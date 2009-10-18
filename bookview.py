@@ -2,9 +2,9 @@ from graphics import *
 from appuifw import *
 from e32calendar import *
 import sys, e32, e32calendar, time, key_codes, appuifw, telephone, contacts, string, os, globalui, graphics
-import pickle, dir_iter, re
+import pickle, dir_iter, re, cProfile
 
-# PyS60EbookReader - version 0.2
+# PyS60EbookReader - version 0.3
 def cmp_file(a, b):
     return cmp(a, b)
     if a[0] < b[0]:
@@ -48,6 +48,13 @@ class DocInfo():
                 return None
         self.file_list.append([filename, pos])
 
+    def GetLibrary(self):
+        books = []
+        for fname in self.file_list:
+            filesize = os.path.getsize(fname[0])
+            books.append( (unicode(fname[0]), unicode(round(fname[1] / float(filesize) * 100, 2))+u'%') )
+        return books
+
 class EnvironmentSaver():
     def __init__(self):
         self.prev_exithandler = app.exit_key_handler
@@ -88,11 +95,10 @@ class FileBrowser:
         self.prev_env = EnvironmentSaver()
         self.ShowContentOfCurrentDir(0)
         app.exit_key_handler = self.destroy
-        app.menu = [(u'Open', self.destroy), (u'Close', self.destroy)]
+        app.menu = [(u'Open', self.lbox_observe), (u'Close', self.destroy)]
         app.screen='normal'
         app.body = self.lb
         self.script_lock.wait()
-
     def destroy(self):
         self.prev_env.Restore()
         self.script_lock.signal()
@@ -136,9 +142,7 @@ class FileBrowser:
         self.lb.set_list(entries, focused_item)
 
 def strip_text(text):
-    #global re_tag
-    re_tag = re.compile('<.*>')
-    re_tag2 = re.compile('[ ][ ]+')
+    global re_tag, re_tag2
     text = unicode(text, 'utf8', 'replace')
 
     #text = text.replace("<p>", "")
@@ -447,7 +451,8 @@ class Application:
         self.config = Config()
         self.doc_info = DocInfo()
         # fill menu
-        app.menu = [(u'Open file', self.OpenFile),
+        app.menu = [(u'Recent files', self.ShowRecentFiles),
+                    (u'Open file', self.OpenFile),
                     (u'Go to start', self.GoToStartOfFile),
                     (u'Preferences', self.config.RunDialog),
                     (u'Exit', self.Quit)]
@@ -460,14 +465,17 @@ class Application:
         app.directional_pad = False
         self.BacklightOn()
 
+
         if self.doc_info.last_file != "":
             self.doc = Document(self.doc_info.last_file, self.config)
             if self.doc:
                 last_pos = self.doc_info.GetLastPos(self.doc_info.last_file)
                 print last_pos
                 self.doc.SetPos(last_pos)
+                self.prev_file_pos = last_pos
         else:
             self.doc = None
+            self.prev_file_pos = 0
 
     def Run(self):
         canvas = Canvas(self.RedrawCB, self.EventCB)
@@ -491,27 +499,59 @@ class Application:
         else:
             self.backlight_timer.cancel()
 
+    def ShowRecentFiles(self):
+        books = self.doc_info.GetLibrary()
+        self.env = EnvironmentSaver()
+        #print books
+        #return None
+        #app.exit_key_handler = self.destroy
+        app.menu = [(u'Open', self.RecentFilesCB), (u'Close', self.RecentFilesClose)]
+        app.screen='normal'
+        app.body = Listbox(books, self.RecentFilesCB)
+        app.exit_key_handler = self.RecentFilesClose
+        self.recent_lb_lock = e32.Ao_lock()
+        self.recent_lb_lock.wait()
+
+    def RecentFilesClose(self):
+        self.env.Restore()
+        self.recent_lb_lock.signal()
+
+    def RecentFilesCB(self, ind=None):
+        if ind == None:
+            ind = app.body.current()
+        self.RecentFilesClose()
+        self.OpenFilename(self.doc_info.GetLibrary()[ind][0])
+        print self.doc_info.GetLibrary()[ind][0]
+        self.RedrawCB(None)
+        return None
+
+    def OpenFilename(self, filename):
+        if self.doc:
+            self.doc_info.SetLastPos(self.doc.filename, self.doc.GetPos())
+            self.doc.Close()
+
+        self.doc = Document(filename, self.config)
+        self.doc.SetPos(self.doc_info.GetLastPos(filename))
+        self.prev_file_pos = self.doc.GetPos()
+        self.prev_event_get_next = True
+        self.prev_event_get_prev = False
+        self.doc_info.last_file = filename
+        self.txt = self.doc.GetNextNLines(self.get_max_number_of_lines(), self.get_max_line_width())
+
     def OpenFile(self):
-        global txt
         browser = FileBrowser()
         #browser.SetDir("e:\\eBooks")
         browser.run()
-        #wait
-        if browser.success:
-            if self.doc:
-                self.doc_info.SetLastPos(self.doc.filename, self.doc.GetPos())
-                self.doc.Close()
-            self.doc = Document(browser.filename, self.config)
-            self.doc.SetPos(self.doc_info.GetLastPos(browser.filename))
-            self.doc_info.last_file = browser.filename
-            txt = self.doc.GetNextNLines(self.get_max_number_of_lines(), self.get_max_line_width())
-            self.RedrawCB(None)
+        if not browser.success:
+            return None
+        self.OpenFilename(browser.filename)
+        self.RedrawCB(None)
 
     def GoToStartOfFile(self):
         if self.doc == None:
             return None
         self.doc.SetPos(0)
-        txt = self.doc.GetNextNLines(self.get_max_number_of_lines(), self.get_max_line_width())
+        self.txt = self.doc.GetNextNLines(self.get_max_number_of_lines(), self.get_max_line_width())
         self.RedrawCB(None)
 
     def Quit(self):
@@ -594,7 +634,12 @@ class Application:
             app.body.end_redraw()
 
     def RedrawCB(self, rect=None):
-        #app.body.clear(config.background_color)
+        if rect != None:
+            #orientation changed?
+            self.doc.SetPos(self.prev_file_pos)
+            self.txt = self.doc.GetNextNLines(self.get_max_number_of_lines(), self.get_max_line_width())
+            self.prev_event_get_prev = False
+            self.prev_event_get_next = True
         self.draw_text(rect)
 
     def EventCB(self, event):
@@ -608,26 +653,39 @@ class Application:
                 if new_pos < 0:
                     new_pos = 0
                 self.doc.SetPos(new_pos)
+                self.prev_file_pos = new_pos
+                self.prev_event_get_prev = False
+                self.prev_event_get_next = True
                 self.txt = self.doc.GetNextNLines(self.get_max_number_of_lines(), self.get_max_line_width())
             self.RedrawCB(None)
 
         elif event['type'] == key_codes.EButton1Down:
             if event['pos'][1] > (app.body.size[1] - 30 ):
+                # bottom bar
                 new_pos = int(float(event['pos'][0]) / app.body.size[0] * self.doc.filesize)
+                self.prev_file_pos = new_pos
+                self.prev_event_get_prev = False
+                self.prev_event_get_next = True
                 self.doc.SetPos(new_pos)
                 self.txt = self.doc.GetNextNLines(self.get_max_number_of_lines(), self.get_max_line_width())
-
             elif event['pos'][1] > (app.body.size[1] / 3*2):
-                self.txt = self.doc.GetNextNLines(self.get_max_number_of_lines(), self.get_max_line_width())
-                if self.prev_event_get_prev == True:
-                    self.txt = self.doc.GetNextNLines(self.get_max_number_of_lines(), self.get_max_line_width())
+                # lower 1/3
+                if self.prev_event_get_prev:
+                    self.doc.SetPos(self.prev_file_pos)
                     self.prev_event_get_prev = False
+                    #self.txt = self.doc.GetNextNLines(self.get_max_number_of_lines(), self.get_max_line_width())
+                self.prev_file_pos = self.doc.GetPos()
+                self.txt = self.doc.GetNextNLines(self.get_max_number_of_lines(), self.get_max_line_width())
+
                 self.prev_event_get_next = True
+                # upper 1/3
             elif event['pos'][1] < (app.body.size[1] / 3):
-                self.txt = self.doc.GetPrevNLines(self.get_max_number_of_lines(), self.get_max_line_width())
-                if self.prev_event_get_next == True:
+                if self.prev_event_get_next:
+                    self.doc.SetPos(self.prev_file_pos)
                     self.prev_event_get_next = False
-                    self.txt = self.doc.GetPrevNLines(self.get_max_number_of_lines(), self.get_max_line_width())
+                    #self.txt = self.doc.GetPrevNLines(self.get_max_number_of_lines(), self.get_max_line_width())
+                self.prev_file_pos = self.doc.GetPos()
+                self.txt = self.doc.GetPrevNLines(self.get_max_number_of_lines(), self.get_max_line_width())
                 self.prev_event_get_prev = True
             else:
                 # in the middle, toggle menu
@@ -635,6 +693,11 @@ class Application:
                     app.screen = 'full'
                 else:
                     app.screen = 'large'
+                if self.prev_event_get_prev == False:
+                    self.doc.SetPos(self.prev_file_pos)
+                self.prev_event_get_prev = False
+                self.prev_event_get_next = True
+                self.txt = self.doc.GetNextNLines(self.get_max_number_of_lines(), self.get_max_line_width())
             self.RedrawCB(None)
 
 '''
@@ -669,5 +732,8 @@ def draw_text_justified(text, row):
                       (config.font, config.font_size, FONT_ANTIALIAS))
         prev_word_total_width += widths[i] + space_size
 '''
+re_tag = re.compile('<.*>')
+re_tag2 = re.compile('[ ][ ]+')
+
 application = Application()
 application.Run()
