@@ -1,18 +1,10 @@
 from graphics import *
 from appuifw import *
 from e32calendar import *
-import sys, e32, e32calendar, time, key_codes, appuifw, telephone, contacts, string, os, globalui
-import pickle, dir_iter
+import sys, e32, e32calendar, time, key_codes, appuifw, telephone, contacts, string, os, globalui, graphics
+import pickle, dir_iter, re
 
-sys.path.append("E:\\Python")
-
-def quit():
-    global backlight_timer, doc_info, doc
-    doc_info.SetLastPos(doc.filename, doc.GetPos())
-    doc_info.Save()
-    backlight_timer.cancel()
-    app_lock.signal()
-
+# PyS60EbookReader - version 0.2
 def cmp_file(a, b):
     return cmp(a, b)
     if a[0] < b[0]:
@@ -144,22 +136,63 @@ class FileBrowser:
         self.lb.set_list(entries, focused_item)
 
 def strip_text(text):
+    #global re_tag
+    re_tag = re.compile('<.*>')
+    re_tag2 = re.compile('[ ][ ]+')
     text = unicode(text, 'utf8', 'replace')
-    text = text.replace("<p>", "")
-    text = text.replace("</p>", "")
-    text = text.replace("<P>", "")
-    text = text.replace("</P>", "")
+
+    #text = text.replace("<p>", "")
+    #text = text.replace("</p>", "")
+    #text = text.replace("<P>", "")
+    #text = text.replace("</P>", "")
     text = text.replace("\n", "")
     text = text.replace("\r", "")
+
+    text = re_tag.sub('', text)
+    text = re_tag2.sub(' ', text)
+
+    '''
+    text = text.replace("<strong>", "")
+    text = text.replace("</strong>", "")
+    text = text.replace("<emphasis>", "")
+    text = text.replace("</emphasis>", "")
+    text = text.replace("<strikethrough>", "")
+    text = text.replace("</strikethrough>", "")
+    text = text.replace("<sub>", "")
+    text = text.replace("</sub>", "")
+    text = text.replace("<sup>", "")
+    text = text.replace("</sup>", "")
+    text = text.replace("<code>", "")
+    text = text.replace("</code>", "")
+    text = text.replace("<section>", "")
+    text = text.replace("</section>", "")
+    '''
     text = string.strip(text)
+
     return text
 
+def create_format_map(text):
+    # do the formating map:
+    format_map = []
+    strong_pos = text.find("<strong>")
+    while strong_pos >= 0:
+        format_map.append([strong_pos, FONT_BOLD])
+        strong_pos = text.find("<strong>", strong_pos+8)
+    strong_pos = text.find("</strong>")
+    while strong_pos >= 0:
+        format_map.append([strong_pos, 0])
+        strong_pos = text.find("</strong>", strong_pos+9)
+    return format_map
+
 class Document:
-    def __init__(self, filename):
+    def __init__(self, filename, config):
+        if not os.path.exists(filename):
+             return None
         self.name = "Document"
         self.filename = filename
         self.handle = file(self.filename, "rb")
         self.filesize = os.path.getsize(self.filename)
+        self.config = config
 
     def SetPos(self, pos):
         self.handle.seek(pos)
@@ -169,6 +202,23 @@ class Document:
 
     def GetRelativePos(self):
         return round(self.handle.tell() / float(self.filesize) * 100, 2)
+
+    def divide_text_by_pix_nums(self, text, desired_width):
+        lines = []
+        start_of_text = 0
+        last_space_pos = 0
+        while last_space_pos > -1:
+            space_pos = text.find(' ', last_space_pos+1)
+            if app.body.measure_text(strip_text(text[start_of_text:space_pos]),
+                                     (self.config.font, self.config.font_size, FONT_ANTIALIAS))[0][2] > desired_width:
+            #if test(text[start_of_text:space_pos]) > desired_width:
+                lines.append(text[start_of_text:last_space_pos])
+                start_of_text = last_space_pos
+                last_space_pos = space_pos
+            else:
+                last_space_pos = space_pos
+        lines.append(text[start_of_text:])
+        return lines
 
     def get_prev_line(self):
         buffer_size = 50
@@ -207,7 +257,7 @@ class Document:
         #print "next", self.handle.tell(),
         while len(lines) < n:
             line = self.handle.readline(2000)
-            lines += divide_text_by_pix_nums(line, desired_width)
+            lines += self.divide_text_by_pix_nums(line, desired_width)
         # seek to back
         if len(lines) > n:
             char_to_rewind = 0
@@ -228,7 +278,7 @@ class Document:
         while len(lines) < n:
             res = self.get_prev_line()
             line = res[0]
-            lines = divide_text_by_pix_nums(line, desired_width) + lines
+            lines = self.divide_text_by_pix_nums(line, desired_width) + lines
             if res[1]:
                 break
         # seek to back
@@ -250,26 +300,6 @@ class Document:
         #self.handle.seek(-14, 1)
         return lines[:n]
 
-    def SeekToLastPos(self):
-        basename = self.filename
-        if basename.rfind('\\'):
-            basename = basename[basename.rfind('\\')+1:]
-        file_pos_name = "e:\\pos-"+ basename +".tmp"
-        if os.path.exists(file_pos_name):
-            pkl_file = file(file_pos_name, 'rb')
-            pos = pickle.load(pkl_file)
-            if pos:
-                doc.SetPos(pos)
-            pkl_file.close()
-
-    def SaveLastPos(self):
-        basename = self.filename
-        if basename.rfind('\\'):
-            basename = basename[basename.rfind('\\')+1:]
-        file_pos_name = "e:\\pos-"+ basename +".tmp"
-        output = file(file_pos_name, 'wb')
-        pickle.dump(self.GetPos(), output)
-        output.close()
     def Close(self):
         self.handle.close()
 
@@ -408,176 +438,236 @@ class Config:
         f.close()
         #self.status_font_size = int(data[)
         app.screen = 'large'
-        redraw_cb()
+        #redraw_cb()
         return True
 
-def open_file():
-    global doc, txt, doc_info
-    browser = FileBrowser()
-    browser.SetDir("e:\\eBooks")
-    browser.run()
-    #wait
-    if browser.success:
-        print "change doc", browser.filename
-        if doc:
-            doc_info.SetLastPos(doc.filename, doc.GetPos())
-            doc.Close()
-        doc = Document(browser.filename)
-        doc.SetPos(doc_info.GetLastPos(browser.filename))
-        doc_info.last_file = browser.filename
-        #doc.SeekToLastPos()
-        txt = doc.GetNextNLines(get_max_number_of_lines(), get_max_line_width())
-        redraw_cb(None)
+class Application:
+    def __init__(self):
+        # read configuration
+        self.config = Config()
+        self.doc_info = DocInfo()
+        # fill menu
+        app.menu = [(u'Open file', self.OpenFile),
+                    (u'Go to start', self.GoToStartOfFile),
+                    (u'Preferences', self.config.RunDialog),
+                    (u'Exit', self.Quit)]
+        # keep backlight funcs
+        self.backlight_timer = e32.Ao_timer()
+        self.txt = ["Welcome to PyS60EbookReader!"," ",  "Use menu to open file..."]
+        app.focus = self.GainFocus
+        self.app_lock = e32.Ao_lock()
+        app.exit_key_handler = self.Quit
+        app.directional_pad = False
+        self.BacklightOn()
 
-def get_max_number_of_lines():
-    global config
-    return (app.body.size[1] - config.offset[1] - config.offset[3]) / config.line_spacing;
-
-def get_max_line_width():
-    global config
-    return app.body.size[0] - config.offset[0] - config.offset[2];
-
-
-def divide_text_by_pix_nums(text, desired_width):
-    lines = []
-    start_of_text = 0
-    last_space_pos = 0
-    while last_space_pos > -1:
-        space_pos = text.find(' ', last_space_pos+1)
-        if app.body.measure_text(strip_text(text[start_of_text:space_pos]),
-                                 (config.font, config.font_size, FONT_ANTIALIAS))[0][2] > desired_width:
-        #if test(text[start_of_text:space_pos]) > desired_width:
-            lines.append(text[start_of_text:last_space_pos])
-            start_of_text = last_space_pos
-            last_space_pos = space_pos
+        if self.doc_info.last_file != "":
+            self.doc = Document(self.doc_info.last_file, self.config)
+            if self.doc:
+                last_pos = self.doc_info.GetLastPos(self.doc_info.last_file)
+                print last_pos
+                self.doc.SetPos(last_pos)
         else:
-            last_space_pos = space_pos
-    lines.append(text[start_of_text:])
-    return lines
+            self.doc = None
 
-def draw_text(rect=None):
-    global txt, config, doc
-    if not rect:
-        app.body.begin_redraw()
-        #print "can redraw"
-    app.body.clear(config.GetColor(config.background_color))
-    row = 0
-    for l in txt:
-        #l = unicode(l, 'utf8', 'replace')
+    def Run(self):
+        canvas = Canvas(self.RedrawCB, self.EventCB)
+        self.prev_event_get_prev = False
+        self.prev_event_get_next = False
+        app.screen='large'
+        app.body = canvas
+        app.name = "Book View in PyS60"
+        if self.doc != None:
+            self.txt = self.doc.GetNextNLines(self.get_max_number_of_lines(), self.get_max_line_width())
+        self.RedrawCB(None)
+        self.app_lock.wait()
+
+    def BacklightOn(self):
+        e32.reset_inactivity()
+        self.backlight_timer.after(10, self.BacklightOn)
+
+    def GainFocus(self, has_focus):
+        if has_focus:
+            self.backlight_timer.after(10, self.BacklightOn)
+        else:
+            self.backlight_timer.cancel()
+
+    def OpenFile(self):
+        global txt
+        browser = FileBrowser()
+        #browser.SetDir("e:\\eBooks")
+        browser.run()
+        #wait
+        if browser.success:
+            if self.doc:
+                self.doc_info.SetLastPos(self.doc.filename, self.doc.GetPos())
+                self.doc.Close()
+            self.doc = Document(browser.filename, self.config)
+            self.doc.SetPos(self.doc_info.GetLastPos(browser.filename))
+            self.doc_info.last_file = browser.filename
+            txt = self.doc.GetNextNLines(self.get_max_number_of_lines(), self.get_max_line_width())
+            self.RedrawCB(None)
+
+    def GoToStartOfFile(self):
+        if self.doc == None:
+            return None
+        self.doc.SetPos(0)
+        txt = self.doc.GetNextNLines(self.get_max_number_of_lines(), self.get_max_line_width())
+        self.RedrawCB(None)
+
+    def Quit(self):
+        if self.doc != None:
+            self.doc_info.SetLastPos(self.doc.filename, self.doc.GetPos())
+            self.doc_info.Save()
+        self.backlight_timer.cancel()
+        self.app_lock.signal()
+
+    def get_max_number_of_lines(self):
+        return (app.body.size[1] - self.config.offset[1] - self.config.offset[3]) / self.config.line_spacing;
+
+    def get_max_line_width(self):
+        return app.body.size[0] - self.config.offset[0] - self.config.offset[2];
+
+    def draw_text_normal(self, text, row):
+        #
+        #if text.find("<strong>") >= 0:
+        #    flags |= FONT_BOLD
+        #if text.find("</strong>") >= 0:
+        #    flags &= ~FONT_BOLD
+        #print flags
+        '''
+        if text.find("<emphasis>") >= 0:
+            flags |= FONT_ITALIC
+        if text.find("</emphasis>") >=0:
+            flags &= ~FONT_ITALIC
+
+        format_map = create_format_map(text) #TODO sort
+        if len(format_map) > 0:
+            # text has formating tags
+            flags = 0
+            total_width = config.offset[0]
+            for f in format_map:
+                print text[:f[0]]
+                app.body.text([total_width, config.offset[1] + config.line_spacing*row+config.line_spacing],
+                              strip_text(text[:f[0]]),
+                              config.GetColor(config.font_color),
+                              (config.font, config.font_size, FO))
+                total_width += app.body.measure_text(strip_text(text[:f[0]]), (config.font, config.font_size, flags))[0][2]
+                flags = f[1]
+
+        else:
+        '''
+        # strong, emphasis, strikethrough, code
+        app.body.text([self.config.offset[0], self.config.offset[1] + self.config.line_spacing*row + self.config.line_spacing],
+                      strip_text(text),
+                      self.config.GetColor(self.config.font_color),
+                      (self.config.font, self.config.font_size, FONT_ANTIALIAS))
+
+
+    def draw_text(self, rect=None):
+        if not rect:
+            app.body.begin_redraw()
+            #print "can redraw"
+        app.body.clear(self.config.GetColor(self.config.background_color))
+        row = 0
+        for l in self.txt:
+            self.draw_text_normal(l, row)
+            row += 1
+        # draw rectangle below status line:
+        rect_width = 30
+        if self.doc != None:
+            offset = int(self.doc.GetRelativePos()/100.0 * (app.body.size[0]-rect_width))
+            app.body.rectangle([0+offset, app.body.size[1]-10, rect_width+offset, app.body.size[1]], fill=0x505050)
+            # status line:
+
+            app.body.text([0, app.body.size[1]],
+                          unicode(self.doc.GetRelativePos())+u'%',
+                          self.config.GetColor(self.config.status_font_color),
+                          (self.config.status_font, self.config.status_font_size, FONT_ANTIALIAS))
+
+            dims = app.body.measure_text(unicode(self.doc.GetRelativePos())+u'%',
+                                  (self.config.status_font, self.config.status_font_size, FONT_ANTIALIAS))
+            app.body.text([dims[1]+20, app.body.size[1]],
+                          unicode(self.doc.filename),
+                          self.config.GetColor(self.config.status_font_color),
+                          (self.config.status_font, self.config.status_font_size, FONT_ANTIALIAS))
+        if not rect:
+            app.body.end_redraw()
+
+    def RedrawCB(self, rect=None):
+        #app.body.clear(config.background_color)
+        self.draw_text(rect)
+
+    def EventCB(self, event):
+        if self.doc == None:
+            return None
+        if event['type'] == key_codes.EDrag:
+            #print "DRAG", event['pos']
+            rect_width = 30
+            if event['pos'][1] > (app.body.size[1] - 20 ):
+                new_pos = int(float(event['pos'][0]-rect_width/2) / (app.body.size[0]-rect_width) * self.doc.filesize)
+                if new_pos < 0:
+                    new_pos = 0
+                self.doc.SetPos(new_pos)
+                self.txt = self.doc.GetNextNLines(self.get_max_number_of_lines(), self.get_max_line_width())
+            self.RedrawCB(None)
+
+        elif event['type'] == key_codes.EButton1Down:
+            if event['pos'][1] > (app.body.size[1] - 30 ):
+                new_pos = int(float(event['pos'][0]) / app.body.size[0] * self.doc.filesize)
+                self.doc.SetPos(new_pos)
+                self.txt = self.doc.GetNextNLines(self.get_max_number_of_lines(), self.get_max_line_width())
+
+            elif event['pos'][1] > (app.body.size[1] / 3*2):
+                self.txt = self.doc.GetNextNLines(self.get_max_number_of_lines(), self.get_max_line_width())
+                if self.prev_event_get_prev == True:
+                    self.txt = self.doc.GetNextNLines(self.get_max_number_of_lines(), self.get_max_line_width())
+                    self.prev_event_get_prev = False
+                self.prev_event_get_next = True
+            elif event['pos'][1] < (app.body.size[1] / 3):
+                self.txt = self.doc.GetPrevNLines(self.get_max_number_of_lines(), self.get_max_line_width())
+                if self.prev_event_get_next == True:
+                    self.prev_event_get_next = False
+                    self.txt = self.doc.GetPrevNLines(self.get_max_number_of_lines(), self.get_max_line_width())
+                self.prev_event_get_prev = True
+            else:
+                # in the middle, toggle menu
+                if app.screen == 'large':
+                    app.screen = 'full'
+                else:
+                    app.screen = 'large'
+            self.RedrawCB(None)
+
+'''
+def draw_text_justified(text, row):
+    global config
+    if text.find('\n') >= 0:
         app.body.text([config.offset[0], config.offset[1] + config.line_spacing*row+config.line_spacing],
-                      strip_text(l),
+                      strip_text(text),
                       config.GetColor(config.font_color),
                       (config.font, config.font_size, FONT_ANTIALIAS))
-        row += 1
-    # draw rectangle below status line:
-    rect_width = 30
-    offset = int(doc.GetRelativePos()/100.0 * (app.body.size[0]-rect_width))
-    app.body.rectangle([0+offset, app.body.size[1]-10, rect_width+offset, app.body.size[1]], fill=0x505050)
-    # status line:
+        return None
+    text = strip_text(text)
+    words = string.split(text, ' ')
+    widths = []
+    totalwidth = 0
+    for w in words:
+        word_width = app.body.measure_text(w, (config.font, config.font_size, FONT_ANTIALIAS))[0][2]
+        widths.append(word_width)
+        totalwidth += word_width
+    space_size = (get_max_line_width() - totalwidth) / (len(words)-1)
 
-    app.body.text([0, app.body.size[1]],
-                  unicode(doc.GetRelativePos())+u'%',
-                  config.GetColor(config.status_font_color),
-                  (config.status_font, config.status_font_size, FONT_ANTIALIAS))
 
-    dims = app.body.measure_text(unicode(doc.GetRelativePos())+u'%',
-                          (config.status_font, config.status_font_size, FONT_ANTIALIAS))
-    app.body.text([dims[1]+20, app.body.size[1]],
-                  unicode(doc.filename),
-                  config.GetColor(config.status_font_color),
-                  (config.status_font, config.status_font_size, FONT_ANTIALIAS))
-
-    if not rect:
-        app.body.end_redraw()
-
-def redraw_cb(rect=None):
-    #app.body.clear(config.background_color)
-    draw_text(rect)
-
-def event_cb(event):
-    global config, doc, txt, prev_event_get_prev, prev_event_get_next
-    if event['type'] == key_codes.EDrag:
-        print "DRAG", event['pos']
-        rect_width = 30
-        if event['pos'][1] > (app.body.size[1] - 20 ):
-            new_pos = int(float(event['pos'][0]-rect_width/2) / (app.body.size[0]-rect_width) * doc.filesize)
-            if new_pos < 0:
-                new_pos = 0
-            doc.SetPos(new_pos)
-            txt = doc.GetNextNLines(get_max_number_of_lines(), get_max_line_width())
-        redraw_cb(None)
-
-    elif event['type'] == key_codes.EButton1Down:
-        if event['pos'][1] > (app.body.size[1] - 30 ):
-            new_pos = int(float(event['pos'][0]) / app.body.size[0] * doc.filesize)
-            doc.SetPos(new_pos)
-            txt = doc.GetNextNLines(get_max_number_of_lines(), get_max_line_width())
-
-        elif event['pos'][1] > (app.body.size[1] / 3*2):
-            txt = doc.GetNextNLines(get_max_number_of_lines(), get_max_line_width())
-            if prev_event_get_prev == True:
-                txt = doc.GetNextNLines(get_max_number_of_lines(), get_max_line_width())
-                prev_event_get_prev = False
-            prev_event_get_next = True
-        elif event['pos'][1] < (app.body.size[1] / 3):
-            txt = doc.GetPrevNLines(get_max_number_of_lines(), get_max_line_width())
-            if prev_event_get_next == True:
-                prev_event_get_next = False
-                txt = doc.GetPrevNLines(get_max_number_of_lines(), get_max_line_width())
-            prev_event_get_prev = True
-        else:
-            # in the middle, toggle menu
-            if app.screen == 'large':
-                app.screen = 'full'
-            else:
-                app.screen = 'large'
-        redraw_cb(None)
-
-def backlight_on():
-    global backlight_timer
-    e32.reset_inactivity()
-    backlight_timer.after(10, backlight_on)
-
-app_lock = e32.Ao_lock()
-app.exit_key_handler = quit
-app.directional_pad = False
-
-txt = unicode("")
-
-## READ CONFIGURATION
-config = Config()
-doc_info = DocInfo()
-
-if doc_info.last_file != "":
-    doc = Document(doc_info.last_file)
-    last_pos = doc_info.GetLastPos(doc_info.last_file)
-    print last_pos
-    doc.SetPos(last_pos)
-
-def go_to_start():
-    global doc
-    doc.SetPos(0)
-    txt = doc.GetNextNLines(get_max_number_of_lines(), get_max_line_width())
-    redraw_cb(None)
-
-#doc.SeekToLastPos()
-app.menu = [(u'Open file', open_file),
-            (u'Go to start', go_to_start),
-            (u'Preferences', config.RunDialog),
-            (u'Exit', quit)]
-
-new_lines = []
-backlight_timer = e32.Ao_timer()
-
-canvas = Canvas(redraw_cb, event_cb)
-
-prev_event_get_prev = False
-prev_event_get_next = False
-app.screen='large'
-app.body = canvas
-app.name = "Book View in Python"
-txt = doc.GetNextNLines(get_max_number_of_lines(), get_max_line_width())
-redraw_cb(None)
-
-backlight_on()
-app_lock.wait()
+    app.body.text([config.offset[0], config.offset[1] + config.line_spacing*row+config.line_spacing],
+                  words[0],
+                  config.GetColor(config.font_color),
+                  (config.font, config.font_size, FONT_ANTIALIAS))
+    prev_word_total_width = widths[0] + space_size + config.offset[0]
+    for i in range(1, len(words)):
+        app.body.text([prev_word_total_width, config.offset[1] + config.line_spacing*row+config.line_spacing],
+                      words[i],
+                      config.GetColor(config.font_color),
+                      (config.font, config.font_size, FONT_ANTIALIAS))
+        prev_word_total_width += widths[i] + space_size
+'''
+application = Application()
+application.Run()
